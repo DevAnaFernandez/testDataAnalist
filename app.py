@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, MetaData, Table
+from sqlalchemy.dialects.postgresql import insert
 import psycopg2
 from cryptography.fernet import Fernet
 
@@ -9,6 +10,9 @@ app = Flask(__name__)
 # Configura la base de datos (Google Cloud SQL - PostgreSQL)
 DATABASE_URL = "postgresql://postgres:testdataanalist2025@34.122.51.97:5432/postgres"
 engine = create_engine(DATABASE_URL)
+metadata = MetaData()
+metadata.reflect(bind=engine)
+users_table = metadata.tables['users']
 
 # Genera una clave para cifrar datos
 key = Fernet.generate_key()
@@ -39,12 +43,22 @@ def upload_csv():
     df['name'] = df['name'].apply(lambda x: cipher_suite.encrypt(x.encode()).decode() if x else None)
     df['email'] = df['email'].apply(lambda x: cipher_suite.encrypt(x.encode()).decode() if x else None)
 
-    # Insertar datos en lotes
-    """batch_size = 3000  # Tamaño de lote
-    for start in range(0, len(df), batch_size):
-        batch = df.iloc[start:start+batch_size]
-        batch.to_sql('users', con=engine, if_exists='append', index=False)"""
+    # Insertar datos en lotes con manejo de conflictos
+    conn = engine.connect()
+    batch_size = 3000  # Tamaño de lote
     
+    for start in range(0, len(df), batch_size):
+        batch = df.iloc[start:start+batch_size].to_dict(orient='records')
+        
+        for row in batch:
+            stmt = insert(users_table).values(row)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=['id'],  # Clave primaria
+                set_={col: stmt.excluded[col] for col in row.keys()}  # Actualizar en caso de conflicto
+            )
+            conn.execute(stmt)
+    
+    conn.close()
     return jsonify({"message": "Datos cargados exitosamente"})
 
 if __name__ == "__main__":
